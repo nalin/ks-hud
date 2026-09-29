@@ -14,6 +14,12 @@ final class HudModel: ObservableObject {
     @Published var useMetric: Bool {
         didSet { UserDefaults.standard.set(useMetric, forKey: "useMetric") }
     }
+    /// Speed a ramp climbs to. Stored exactly (e.g. 3.0 mph); snapped to the treadmill's 0.1 km/h grid when used.
+    @Published var rampTargetKmh: Double {
+        didSet { UserDefaults.standard.set(rampTargetKmh, forKey: "rampTargetKmh") }
+    }
+    /// When the running ramp takes its next step; nil when no ramp is running.
+    @Published private(set) var nextRampStepAt: Date?
 
     let store = SessionStore()
     private var treadmill: Treadmill!
@@ -21,21 +27,29 @@ final class HudModel: ObservableObject {
     private var pendingSend: DispatchWorkItem?
     private var targetSetAt = Date.distantPast
     private var startRequestedAt = Date.distantPast
+    private var rampTimer: Timer?
+    private var rampStartKmh = 0.0
+    /// Last speed the ramp itself asked for, to tell its own changes from ones made on the treadmill.
+    private var rampCommandedKmh = 0.0
 
     /// Shorter sessions (accidental belt starts) are not saved.
     private static let minSavedS = 30
+    static let rampIntervalS: TimeInterval = 15
 
     init() {
         useMetric = UserDefaults.standard.object(forKey: "useMetric") as? Bool
             ?? (Locale.current.measurementSystem == .metric)
+        rampTargetKmh = UserDefaults.standard.object(forKey: "rampTargetKmh") as? Double ?? 3.0 * 1.609344
         treadmill = Treadmill()
         treadmill.onLink = { [weak self] link in
             self?.link = link
             if case .connected = link { return }
             self?.live = nil
+            self?.stopRamp()
             self?.checkpoint()
         }
         treadmill.onSample = { [weak self] in self?.ingest($0) }
+        treadmill.onMachineEvent = { [weak self] in self?.handle($0) }
         treadmill.onControlResult = { [weak self] error in
             self?.controlError = error
             if error != nil {
@@ -58,6 +72,61 @@ final class HudModel: ObservableObject {
 
     var canStart: Bool { canSendCommands && live != nil && !beltMoving && !starting }
 
+    var speedRange: ClosedRange<Double> { treadmill.speedRange }
+
+    var ramping: Bool { nextRampStepAt != nil }
+
+    /// The ramp target as the treadmill can actually run it.
+    private var rampGoalKmh: Double {
+        min(max((rampTargetKmh * 10).rounded() / 10, speedRange.lowerBound), speedRange.upperBound)
+    }
+
+    /// Speed the belt is at or has been told to go to.
+    private var commandedKmh: Double? { targetKmh ?? live?.speedKmh }
+
+    var canRamp: Bool { canControlSpeed && (commandedKmh ?? 0) < rampGoalKmh - 0.05 }
+
+    /// 0–1: how far the belt's actual speed has climbed from where the ramp started to its goal.
+    var rampProgress: Double {
+        guard let speed = live?.speedKmh, rampGoalKmh > rampStartKmh else { return 0 }
+        return min(max((speed - rampStartKmh) / (rampGoalKmh - rampStartKmh), 0), 1)
+    }
+
+    func toggleRamp() {
+        if ramping {
+            stopRamp()
+        } else if canRamp {
+            rampStartKmh = live?.speedKmh ?? 0
+            rampStep()
+        }
+    }
+
+    /// Raises the speed one step now and schedules the next, until the goal is reached.
+    private func rampStep() {
+        guard canControlSpeed, let current = commandedKmh, current < rampGoalKmh - 0.05 else {
+            stopRamp()
+            return
+        }
+        let next = min(Format(metric: useMetric).nudged(current, up: true), rampGoalKmh)
+        rampCommandedKmh = next
+        requestSpeed(next, coalesce: false)
+        guard next < rampGoalKmh - 0.05 else {
+            stopRamp()
+            return
+        }
+        nextRampStepAt = Date().addingTimeInterval(Self.rampIntervalS)
+        rampTimer?.invalidate()
+        rampTimer = Timer.scheduledTimer(withTimeInterval: Self.rampIntervalS, repeats: false) { [weak self] _ in
+            self?.rampStep()
+        }
+    }
+
+    private func stopRamp() {
+        rampTimer?.invalidate()
+        rampTimer = nil
+        nextRampStepAt = nil
+    }
+
     func start() {
         guard canStart else { return }
         controlError = nil
@@ -67,22 +136,31 @@ final class HudModel: ObservableObject {
     }
 
     func nudgeSpeed(up: Bool) {
-        guard canControlSpeed, let current = targetKmh ?? live?.speedKmh else { return }
-        let range = treadmill.speedRange
-        let next = min(max(Format(metric: useMetric).nudged(current, up: up), range.lowerBound), range.upperBound)
+        guard canControlSpeed, let current = commandedKmh else { return }
+        stopRamp()  // manual adjustment takes over from a running ramp
+        let next = min(max(Format(metric: useMetric).nudged(current, up: up), speedRange.lowerBound), speedRange.upperBound)
         guard next != current else { return }
-        targetKmh = next
+        requestSpeed(next, coalesce: true)
+    }
+
+    private func requestSpeed(_ kmh: Double, coalesce: Bool) {
+        targetKmh = kmh
         targetSetAt = Date()
         controlError = nil
-        // Coalesce rapid clicks into one command.
         pendingSend?.cancel()
-        let send = DispatchWorkItem { [weak self] in self?.treadmill.setTargetSpeed(next) }
+        guard coalesce else {
+            treadmill.setTargetSpeed(kmh)
+            return
+        }
+        // Coalesce rapid clicks into one command.
+        let send = DispatchWorkItem { [weak self] in self?.treadmill.setTargetSpeed(kmh) }
         pendingSend = send
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: send)
     }
 
     func pause() {
         guard canControlSpeed else { return }
+        stopRamp()
         pendingSend?.cancel()
         targetKmh = nil
         controlError = nil
@@ -95,8 +173,25 @@ final class HudModel: ObservableObject {
         lastCheckpoint = Date()
     }
 
+    /// Pausing or changing speed on the treadmill itself cancels a ramp, so it never fights the user.
+    private func handle(_ event: Treadmill.MachineEvent) {
+        switch event {
+        case .haltedByUser, .controlLost:
+            stopRamp()
+        case .targetSpeedChanged(let kmh):
+            if ramping, abs(kmh - rampCommandedKmh) > 0.05 { stopRamp() }
+        }
+    }
+
     private func ingest(_ sample: TreadmillSample) {
+        let previousKmh = live?.speedKmh
         live = sample
+        // Backstop for treadmills that don't send status events: during a ramp the belt only ever
+        // speeds up to what the ramp asked for, so slowing down or overshooting means someone else took over.
+        if ramping, let previousKmh,
+           sample.speedKmh < previousKmh - 0.05 || sample.speedKmh > rampCommandedKmh + 0.05 {
+            stopRamp()
+        }
         let now = Date()
         if let target = targetKmh,
            abs(sample.speedKmh - target) < 0.05 || sample.speedKmh == 0 || now.timeIntervalSince(targetSetAt) > 15 {

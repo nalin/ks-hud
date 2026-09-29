@@ -20,6 +20,14 @@ struct Format {
         return next
     }
 
+    /// Ramp targets offered in the picker: 1.5–4.0 mph by 0.1, or 2.0–6.4 km/h by 0.2, within the treadmill's range.
+    func rampTargets(within range: ClosedRange<Double>) -> [Double] {
+        let values = metric
+            ? stride(from: 2.0, through: 6.4001, by: 0.2).map { $0 }
+            : stride(from: 1.5, through: 4.0001, by: 0.1).map { $0 * 1.609344 }
+        return values.filter { range.contains(($0 * 10).rounded() / 10) }
+    }
+
     func distance(_ meters: Int) -> String {
         String(format: "%.2f", Double(meters) / (metric ? 1000 : 1609.344))
     }

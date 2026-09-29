@@ -10,15 +10,25 @@ final class Treadmill: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate 
         case unavailable(String)
     }
 
+    /// Fitness Machine Status (0x2ADA) events the app reacts to.
+    enum MachineEvent {
+        /// Paused or stopped from the treadmill, its remote, or the safety key.
+        case haltedByUser
+        case targetSpeedChanged(Double)
+        case controlLost
+    }
+
     private static let ftmsService = CBUUID(string: "1826")
     private static let treadmillData = CBUUID(string: "2ACD")
     private static let speedRangeChar = CBUUID(string: "2AD4")
     private static let controlPointChar = CBUUID(string: "2AD9")
+    private static let machineStatusChar = CBUUID(string: "2ADA")
 
     var onLink: ((Link) -> Void)?
     var onSample: ((TreadmillSample) -> Void)?
     /// nil when a command succeeded, otherwise why it failed.
     var onControlResult: ((String?) -> Void)?
+    var onMachineEvent: ((MachineEvent) -> Void)?
 
     /// km/h limits reported by the treadmill (defaults match the KS-Z1D).
     private(set) var speedRange: ClosedRange<Double> = 1.6...6.4
@@ -147,14 +157,15 @@ final class Treadmill: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate 
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         for service in peripheral.services ?? [] where service.uuid == Self.ftmsService {
-            peripheral.discoverCharacteristics([Self.treadmillData, Self.speedRangeChar, Self.controlPointChar], for: service)
+            peripheral.discoverCharacteristics(
+                [Self.treadmillData, Self.speedRangeChar, Self.controlPointChar, Self.machineStatusChar], for: service)
         }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         for ch in service.characteristics ?? [] {
             switch ch.uuid {
-            case Self.treadmillData:
+            case Self.treadmillData, Self.machineStatusChar:
                 peripheral.setNotifyValue(true, for: ch)
             case Self.speedRangeChar:
                 peripheral.readValue(for: ch)
@@ -180,6 +191,23 @@ final class Treadmill: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate 
             if lo < hi { speedRange = lo...hi }
         case Self.controlPointChar:
             handleControlResponse([UInt8](data))
+        case Self.machineStatusChar:
+            handleMachineStatus([UInt8](data))
+        default:
+            break
+        }
+    }
+
+    private func handleMachineStatus(_ bytes: [UInt8]) {
+        guard let opcode = bytes.first else { return }
+        switch opcode {
+        case 0x02, 0x03:  // stopped or paused by the user; stopped by safety key
+            onMachineEvent?(.haltedByUser)
+        case 0x05 where bytes.count >= 3:
+            onMachineEvent?(.targetSpeedChanged(Double(Int(bytes[1]) | Int(bytes[2]) << 8) / 100))
+        case 0xFF:
+            hasControl = false
+            onMachineEvent?(.controlLost)
         default:
             break
         }
