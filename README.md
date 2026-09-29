@@ -19,3 +19,7 @@ open build/KSHud.app
 ```
 
 On first launch, allow Bluetooth and Screen Recording. Close any phone app connected to the treadmill; it accepts one connection at a time.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

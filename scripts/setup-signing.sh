@@ -5,15 +5,25 @@
 set -eu
 DIR="$HOME/Library/Application Support/KSHud/signing"
 KEYCHAIN="$DIR/signing.keychain-db"
-PASSWORD="kshud-local"
+PASSWORD_FILE="$DIR/password"
 NAME="KS HUD Local Signing"
 
+umask 077
+mkdir -p "$DIR"
+
 if [ -f "$KEYCHAIN" ]; then
+    if [ ! -f "$PASSWORD_FILE" ]; then
+        # Keychains made by earlier versions of this script used a fixed password; switch to a random one.
+        PASSWORD=$(/usr/bin/openssl rand -hex 24)
+        security set-keychain-password -o kshud-local -p "$PASSWORD" "$KEYCHAIN"
+        printf '%s' "$PASSWORD" > "$PASSWORD_FILE"
+        echo "Moved $KEYCHAIN to a random password"
+    fi
     echo "Signing identity already set up in $KEYCHAIN"
     exit 0
 fi
 
-mkdir -p "$DIR"
+PASSWORD=$(/usr/bin/openssl rand -hex 24)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -39,4 +49,5 @@ security set-keychain-settings "$KEYCHAIN"
 security unlock-keychain -p "$PASSWORD" "$KEYCHAIN"
 security import "$TMP/id.p12" -k "$KEYCHAIN" -P "$PASSWORD" -T /usr/bin/codesign >/dev/null
 security set-key-partition-list -S apple-tool:,apple: -s -k "$PASSWORD" "$KEYCHAIN" >/dev/null
+printf '%s' "$PASSWORD" > "$PASSWORD_FILE"
 echo "Created signing identity \"$NAME\" in $KEYCHAIN"

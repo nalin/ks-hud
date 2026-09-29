@@ -6,12 +6,14 @@ cd "$(dirname "$0")/.."
 swift build -c release
 APP=build/KSHud.app
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/KSHud "$APP/Contents/MacOS/KSHud"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
-KEYCHAIN="$HOME/Library/Application Support/KSHud/signing/signing.keychain-db"
-if [ ! -f "$KEYCHAIN" ]; then
+SIGNING="$HOME/Library/Application Support/KSHud/signing"
+KEYCHAIN="$SIGNING/signing.keychain-db"
+if [ ! -f "$KEYCHAIN" ] || [ ! -f "$SIGNING/password" ]; then
     echo "warning: no local signing identity; run scripts/setup-signing.sh to keep permissions across builds" >&2
     codesign --force --sign - "$APP"
     echo "Built $APP (ad-hoc signed)"
@@ -28,7 +30,7 @@ done <<LIST
 $(security list-keychains -d user)
 LIST
 trap 'security list-keychains -d user -s "$@"' EXIT
-security unlock-keychain -p kshud-local "$KEYCHAIN"
+security unlock-keychain -p "$(cat "$SIGNING/password")" "$KEYCHAIN"
 security list-keychains -d user -s "$@" "$KEYCHAIN"
 codesign --force --sign "KS HUD Local Signing" "$APP"
 echo "Built $APP"

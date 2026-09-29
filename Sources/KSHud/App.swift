@@ -69,7 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(NSMenuItem(title: "Quit KS HUD", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "figure.walk", accessibilityDescription: "KS HUD")
+        statusItem.button?.image = .statusIcon
         statusItem.menu = menu
     }
 
