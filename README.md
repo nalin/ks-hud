@@ -5,7 +5,9 @@ A macOS menu bar app that floats a live workout overlay over your screen for a K
 - Live session time, speed, distance, steps, calories and pace, plus today's totals
 - Speed −/+ and play/pause from the overlay (it never sends Stop; end sessions on the treadmill)
 - Ramp: raises speed 0.1 mph every 15 s up to a chosen target, and stops if you take over on the treadmill
-- Adaptive contrast: the overlay turns dark or light depending on what's behind it (needs Screen Recording)
+- Distance or time goals with a progress bar and time left, plus an optional cool-down that steps the speed
+  down 0.2 mph every 15 s once the goal is reached
+- Appearance: Auto (turns dark or light depending on what's behind it; needs Screen Recording), Light, or Dark
 - History inside the overlay (and in a separate window): sessions grouped by day, expandable to individual sessions
 - Sessions saved as JSON in `~/Library/Application Support/KSHud/sessions/`
 

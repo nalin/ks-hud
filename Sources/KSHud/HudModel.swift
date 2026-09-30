@@ -18,8 +18,62 @@ final class HudModel: ObservableObject {
     @Published var rampTargetKmh: Double {
         didSet { UserDefaults.standard.set(rampTargetKmh, forKey: "rampTargetKmh") }
     }
-    /// When the running ramp takes its next step; nil when no ramp is running.
-    @Published private(set) var nextRampStepAt: Date?
+    /// What the current session is working toward.
+    enum SessionGoal: Equatable {
+        case distance(meters: Double)
+        case time(seconds: Int)
+
+        /// The goal's size, in the same units as `amount(in:)`.
+        var total: Double {
+            switch self {
+            case .distance(let meters): meters
+            case .time(let seconds): Double(seconds)
+            }
+        }
+
+        /// How much of the goal a session has covered: metres walked or seconds on the treadmill's timer.
+        func amount(in session: SessionRecord?) -> Double {
+            switch self {
+            case .distance: Double(session?.distanceM ?? 0)
+            case .time: Double(session?.elapsedS ?? 0)
+            }
+        }
+    }
+
+    /// Goal for the current session; nil for none.
+    @Published var goal: SessionGoal? {
+        didSet {
+            let defaults = UserDefaults.standard
+            switch goal {
+            case .distance(let meters):
+                defaults.set("distance", forKey: "goalKind")
+                defaults.set(meters, forKey: "goalValue")
+            case .time(let seconds):
+                defaults.set("time", forKey: "goalKind")
+                defaults.set(Double(seconds), forKey: "goalValue")
+            case nil:
+                defaults.set("none", forKey: "goalKind")
+            }
+        }
+    }
+    /// Speed the automatic cool-down after a distance goal slows to; nil turns cool-down off.
+    @Published var coolDownTargetKmh: Double? {
+        didSet { UserDefaults.standard.set(coolDownTargetKmh ?? 0, forKey: "coolDownTargetKmh") }
+    }
+
+    /// A timed series of speed steps: up to the ramp target, or down to the cool-down speed.
+    enum SpeedProgram {
+        case ramp
+        case coolDown
+
+        var up: Bool { self == .ramp }
+        /// Speed steps per tick: ramp climbs 0.1 mph (0.2 km/h); cool-down drops twice that.
+        var stepsPerTick: Int { self == .ramp ? 1 : 2 }
+    }
+
+    @Published private(set) var program: SpeedProgram?
+    /// When the running program takes its next step.
+    @Published private(set) var nextProgramStepAt: Date?
 
     let store = SessionStore()
     private var treadmill: Treadmill!
@@ -27,25 +81,30 @@ final class HudModel: ObservableObject {
     private var pendingSend: DispatchWorkItem?
     private var targetSetAt = Date.distantPast
     private var startRequestedAt = Date.distantPast
-    private var rampTimer: Timer?
-    private var rampStartKmh = 0.0
-    /// Last speed the ramp itself asked for, to tell its own changes from ones made on the treadmill.
-    private var rampCommandedKmh = 0.0
+    private var programTimer: Timer?
+    private var programStartKmh = 0.0
+    /// Last speed the program itself asked for, to tell its own changes from ones made on the treadmill.
+    private var programCommandedKmh = 0.0
+    /// Session whose distance goal has already triggered a cool-down, so it only happens once.
+    private var coolDownSessionID: String?
 
     /// Shorter sessions (accidental belt starts) are not saved.
     private static let minSavedS = 30
-    static let rampIntervalS: TimeInterval = 15
+    static let programIntervalS: TimeInterval = 15
 
     init() {
         useMetric = UserDefaults.standard.object(forKey: "useMetric") as? Bool
             ?? (Locale.current.measurementSystem == .metric)
         rampTargetKmh = UserDefaults.standard.object(forKey: "rampTargetKmh") as? Double ?? 3.0 * 1.609344
+        goal = Self.savedGoal()
+        let savedCoolDown = UserDefaults.standard.object(forKey: "coolDownTargetKmh") as? Double
+        coolDownTargetKmh = savedCoolDown.map { $0 > 0 ? $0 : nil } ?? 2.0 * 1.609344
         treadmill = Treadmill()
         treadmill.onLink = { [weak self] link in
             self?.link = link
             if case .connected = link { return }
             self?.live = nil
-            self?.stopRamp()
+            self?.stopProgram()
             self?.checkpoint()
         }
         treadmill.onSample = { [weak self] in self?.ingest($0) }
@@ -58,6 +117,19 @@ final class HudModel: ObservableObject {
             }
         }
         refreshToday()
+    }
+
+    private static func savedGoal() -> SessionGoal? {
+        let defaults = UserDefaults.standard
+        let value = defaults.double(forKey: "goalValue")
+        switch defaults.string(forKey: "goalKind") {
+        case "distance": return .distance(meters: value)
+        case "time": return .time(seconds: Int(value))
+        case "none": return nil
+        default:
+            // Before time goals existed only a distance goal was stored.
+            return (defaults.object(forKey: "distanceGoalM") as? Double).map { .distance(meters: $0) }
+        }
     }
 
     var beltMoving: Bool { (live?.speedKmh ?? 0) > 0 }
@@ -74,57 +146,82 @@ final class HudModel: ObservableObject {
 
     var speedRange: ClosedRange<Double> { treadmill.speedRange }
 
-    var ramping: Bool { nextRampStepAt != nil }
+    /// A speed as the treadmill can actually run it.
+    private func onGrid(_ kmh: Double) -> Double {
+        min(max((kmh * 10).rounded() / 10, speedRange.lowerBound), speedRange.upperBound)
+    }
 
-    /// The ramp target as the treadmill can actually run it.
-    private var rampGoalKmh: Double {
-        min(max((rampTargetKmh * 10).rounded() / 10, speedRange.lowerBound), speedRange.upperBound)
+    private func goalKmh(for program: SpeedProgram) -> Double? {
+        switch program {
+        case .ramp: onGrid(rampTargetKmh)
+        case .coolDown: coolDownTargetKmh.map(onGrid)
+        }
     }
 
     /// Speed the belt is at or has been told to go to.
     private var commandedKmh: Double? { targetKmh ?? live?.speedKmh }
 
-    var canRamp: Bool { canControlSpeed && (commandedKmh ?? 0) < rampGoalKmh - 0.05 }
+    /// Whether the program would change the speed at all from where the belt is (or is headed).
+    private func hasRoom(_ program: SpeedProgram) -> Bool {
+        guard canControlSpeed, let current = commandedKmh, let goal = goalKmh(for: program) else { return false }
+        return program.up ? current < goal - 0.05 : current > goal + 0.05
+    }
 
-    /// 0–1: how far the belt's actual speed has climbed from where the ramp started to its goal.
-    var rampProgress: Double {
-        guard let speed = live?.speedKmh, rampGoalKmh > rampStartKmh else { return 0 }
-        return min(max((speed - rampStartKmh) / (rampGoalKmh - rampStartKmh), 0), 1)
+    var canRamp: Bool { hasRoom(.ramp) }
+
+    /// 0–1: how far the belt's actual speed has moved from where the program started toward its goal.
+    var programProgress: Double {
+        guard let program, let speed = live?.speedKmh, let goal = goalKmh(for: program),
+              abs(goal - programStartKmh) > 0.01 else { return 0 }
+        return min(max((speed - programStartKmh) / (goal - programStartKmh), 0), 1)
     }
 
     func toggleRamp() {
-        if ramping {
-            stopRamp()
+        if program == .ramp {
+            stopProgram()
         } else if canRamp {
-            rampStartKmh = live?.speedKmh ?? 0
-            rampStep()
+            startProgram(.ramp)
         }
     }
 
-    /// Raises the speed one step now and schedules the next, until the goal is reached.
-    private func rampStep() {
-        guard canControlSpeed, let current = commandedKmh, current < rampGoalKmh - 0.05 else {
-            stopRamp()
+    func cancelProgram() {
+        stopProgram()
+    }
+
+    private func startProgram(_ program: SpeedProgram) {
+        stopProgram()
+        guard hasRoom(program) else { return }
+        self.program = program
+        programStartKmh = live?.speedKmh ?? 0
+        programStep()
+    }
+
+    /// Moves the speed one step now and schedules the next, until the goal is reached.
+    private func programStep() {
+        guard let program, hasRoom(program), let current = commandedKmh, let goal = goalKmh(for: program) else {
+            stopProgram()
             return
         }
-        let next = min(Format(metric: useMetric).nudged(current, up: true), rampGoalKmh)
-        rampCommandedKmh = next
+        let stepped = Format(metric: useMetric).nudged(current, up: program.up, steps: program.stepsPerTick)
+        let next = program.up ? min(stepped, goal) : max(stepped, goal)
+        programCommandedKmh = next
         requestSpeed(next, coalesce: false)
-        guard next < rampGoalKmh - 0.05 else {
-            stopRamp()
+        guard abs(next - goal) > 0.05 else {
+            stopProgram()
             return
         }
-        nextRampStepAt = Date().addingTimeInterval(Self.rampIntervalS)
-        rampTimer?.invalidate()
-        rampTimer = Timer.scheduledTimer(withTimeInterval: Self.rampIntervalS, repeats: false) { [weak self] _ in
-            self?.rampStep()
+        nextProgramStepAt = Date().addingTimeInterval(Self.programIntervalS)
+        programTimer?.invalidate()
+        programTimer = Timer.scheduledTimer(withTimeInterval: Self.programIntervalS, repeats: false) { [weak self] _ in
+            self?.programStep()
         }
     }
 
-    private func stopRamp() {
-        rampTimer?.invalidate()
-        rampTimer = nil
-        nextRampStepAt = nil
+    private func stopProgram() {
+        programTimer?.invalidate()
+        programTimer = nil
+        program = nil
+        nextProgramStepAt = nil
     }
 
     func start() {
@@ -137,7 +234,7 @@ final class HudModel: ObservableObject {
 
     func nudgeSpeed(up: Bool) {
         guard canControlSpeed, let current = commandedKmh else { return }
-        stopRamp()  // manual adjustment takes over from a running ramp
+        stopProgram()  // manual adjustment takes over from a running ramp or cool-down
         let next = min(max(Format(metric: useMetric).nudged(current, up: up), speedRange.lowerBound), speedRange.upperBound)
         guard next != current else { return }
         requestSpeed(next, coalesce: true)
@@ -160,7 +257,7 @@ final class HudModel: ObservableObject {
 
     func pause() {
         guard canControlSpeed else { return }
-        stopRamp()
+        stopProgram()
         pendingSend?.cancel()
         targetKmh = nil
         controlError = nil
@@ -173,24 +270,27 @@ final class HudModel: ObservableObject {
         lastCheckpoint = Date()
     }
 
-    /// Pausing or changing speed on the treadmill itself cancels a ramp, so it never fights the user.
+    /// Pausing or changing speed on the treadmill itself cancels a program, so it never fights the user.
     private func handle(_ event: Treadmill.MachineEvent) {
         switch event {
         case .haltedByUser, .controlLost:
-            stopRamp()
+            stopProgram()
         case .targetSpeedChanged(let kmh):
-            if ramping, abs(kmh - rampCommandedKmh) > 0.05 { stopRamp() }
+            if program != nil, abs(kmh - programCommandedKmh) > 0.05 { stopProgram() }
         }
     }
 
     private func ingest(_ sample: TreadmillSample) {
         let previousKmh = live?.speedKmh
+        let previousSession = session
         live = sample
-        // Backstop for treadmills that don't send status events: during a ramp the belt only ever
-        // speeds up to what the ramp asked for, so slowing down or overshooting means someone else took over.
-        if ramping, let previousKmh,
-           sample.speedKmh < previousKmh - 0.05 || sample.speedKmh > rampCommandedKmh + 0.05 {
-            stopRamp()
+        // Backstop for treadmills that don't send status events: during a program the belt only moves
+        // toward what the program asked for, so moving the other way or past it means someone else took over.
+        if let program, let previousKmh {
+            let wrongWay = program.up ? sample.speedKmh < previousKmh - 0.05 : sample.speedKmh > previousKmh + 0.05
+            let overshot = program.up ? sample.speedKmh > programCommandedKmh + 0.05
+                                      : sample.speedKmh < programCommandedKmh - 0.05
+            if wrongWay || overshot { stopProgram() }
         }
         let now = Date()
         if let target = targetKmh,
@@ -213,8 +313,19 @@ final class HudModel: ObservableObject {
             session = nil
         }
 
+        startCoolDownIfGoalJustReached(previous: previousSession)
+
         if now.timeIntervalSince(lastCheckpoint) >= 30 { checkpoint() }
         refreshToday()
+    }
+
+    /// Starts the cool-down when this sample carried the session across its goal (once per session).
+    private func startCoolDownIfGoalJustReached(previous: SessionRecord?) {
+        guard let goal, let s = session, let previous, previous.id == s.id,
+              goal.amount(in: previous) < goal.total, goal.amount(in: s) >= goal.total,
+              coolDownSessionID != s.id else { return }
+        coolDownSessionID = s.id
+        startProgram(.coolDown)
     }
 
     private func update(_ s: inout SessionRecord, with sample: TreadmillSample, at now: Date) {

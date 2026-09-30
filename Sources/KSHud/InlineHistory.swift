@@ -28,33 +28,49 @@ struct InlineHistory: View {
                     .textCase(.uppercase)
                     .foregroundStyle(ink.opacity(0.4))
                     .frame(height: Self.headerHeight)
-                ScrollView(.vertical) {
-                    LazyVStack(spacing: 0) {
-                        ForEach(Array(days.prefix(loadedDays).enumerated()), id: \.element.id) { index, day in
-                            dayRow(day)
-                                .onAppear {
-                                    if index >= loadedDays - 3, loadedDays < days.count { loadedDays += Self.pageSize }
-                                }
-                            if expanded.contains(day.date) {
-                                ForEach(day.sessions) { sessionRow($0) }
+                if contentHeight(days) <= viewportLimit {
+                    // Everything fits: a plain stack, whose height animates smoothly with the rest of the HUD.
+                    VStack(spacing: 0) {
+                        ForEach(days) { day in
+                            dayRows(day)
+                        }
+                    }
+                } else {
+                    // More than a week: a scroll view locked at a week's height. On macOS a ScrollView that
+                    // changes height repositions its content every frame, which made rows jitter while animating.
+                    ScrollView(.vertical) {
+                        LazyVStack(spacing: 0) {
+                            ForEach(Array(days.prefix(loadedDays).enumerated()), id: \.element.id) { index, day in
+                                dayRows(day)
+                                    .onAppear {
+                                        if index >= loadedDays - 3, loadedDays < days.count { loadedDays += Self.pageSize }
+                                    }
                             }
                         }
                     }
+                    .scrollIndicators(.automatic)
+                    .frame(height: viewportLimit)
                 }
-                .scrollIndicators(.automatic)
-                .frame(height: viewportHeight(days))
             }
         }
     }
 
-    /// A week of collapsed days; shorter when there's less history, so the list never shows empty space.
-    private func viewportHeight(_ days: [DaySummary]) -> CGFloat {
-        var height: CGFloat = 0
-        for day in days.prefix(loadedDays) {
-            height += Self.dayHeight
-            if expanded.contains(day.date) { height += CGFloat(day.sessions.count) * Self.sessionHeight }
+    private var viewportLimit: CGFloat { CGFloat(Self.visibleDays) * Self.dayHeight }
+
+    /// Height of every day row plus the session rows of expanded days.
+    private func contentHeight(_ days: [DaySummary]) -> CGFloat {
+        days.reduce(0) { height, day in
+            height + Self.dayHeight + (expanded.contains(day.date) ? CGFloat(day.sessions.count) * Self.sessionHeight : 0)
         }
-        return min(height, CGFloat(Self.visibleDays) * Self.dayHeight)
+    }
+
+    /// A day's row followed by its sessions when expanded.
+    @ViewBuilder
+    private func dayRows(_ day: DaySummary) -> some View {
+        dayRow(day)
+        if expanded.contains(day.date) {
+            ForEach(day.sessions) { sessionRow($0) }
+        }
     }
 
     private func dayRow(_ day: DaySummary) -> some View {
@@ -69,6 +85,7 @@ struct InlineHistory: View {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 8, weight: .bold))
                         .rotationEffect(.degrees(isOpen ? 90 : 0))
+                        .animation(HudAnimation.resize, value: isOpen)
                         .foregroundStyle(ink.opacity(0.4))
                     Text(title(for: day.date))
                 },

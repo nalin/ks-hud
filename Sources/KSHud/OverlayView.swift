@@ -40,9 +40,13 @@ struct OverlayView: View {
                 .font(.system(size: 40, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(model.session == nil ? ink.opacity(0.35) : ink)
+            if let goal = model.goal {
+                goalBar(goal)
+                    .padding(.top, -6)  // reads as part of the timer block
+            }
             Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 10) {
-                GridRow {
-                    Stat(label: "Speed", value: fmt.speed(speed), unit: fmt.speedUnit)
+                GridRow(alignment: .top) {
+                    Stat(label: "Speed", value: fmt.speed(speed), unit: fmt.speedUnit, detail: "Pace \(fmt.pace(speed))")
                     Stat(label: "Distance", value: fmt.distance(model.session?.distanceM ?? 0), unit: fmt.distanceUnit)
                 }
                 GridRow {
@@ -52,18 +56,19 @@ struct OverlayView: View {
             }
             speedControl
             rampControl
-            Text(model.controlError ?? "Pace \(fmt.pace(speed))")
-                .font(.system(size: 12, weight: .medium))
-                .monospacedDigit()
-                .foregroundStyle(model.controlError == nil ? ink.opacity(0.6) : .red)
-                .lineLimit(1)
+            if let error = model.controlError {
+                Text(error)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.red)
+                    .lineLimit(1)
+            }
             Rectangle().fill(ink.opacity(0.12)).frame(height: 1)
             today
         }
         .padding(16)
         .frame(width: 260, alignment: .leading)
         .foregroundStyle(ink)
-        .background(RoundedRectangle(cornerRadius: 16).fill(backdrop.hudIsLight ? Color.white.opacity(0.85) : .black.opacity(0.72)))
+        .background(RoundedRectangle(cornerRadius: 16).fill(backdrop.hudIsLight ? Color.white.opacity(0.85) : .black.opacity(0.82)))
         .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(ink.opacity(0.1)))
         // Content is revealed as the card grows instead of spilling past its bottom edge mid-animation.
         .clipShape(RoundedRectangle(cornerRadius: 16))
@@ -86,7 +91,113 @@ struct OverlayView: View {
                 .tracking(0.6)
                 .foregroundStyle(ink.opacity(0.6))
                 .lineLimit(1)
+            Spacer(minLength: 0)
+            HeaderIconButton(symbol: "flag.checkered", active: model.goal != nil, action: showGoalMenu)
+                .help("Session goal")
         }
+    }
+
+    /// "1.20 of 3.00 mi" or "22:10 of 45:00", time left on the right, over a thin progress line.
+    /// For distance goals the time left assumes the current belt speed; time goals follow the session timer.
+    private func goalBar(_ goal: HudModel.SessionGoal) -> some View {
+        let covered = goal.amount(in: model.session)
+        let progress = min(covered / goal.total, 1)
+        let reached = covered >= goal.total
+        let summary = switch goal {
+        case .distance(let meters): "\(fmt.distance(Int(covered))) of \(fmt.distance(Int(meters.rounded()))) \(fmt.distanceUnit)"
+        case .time(let seconds): "\(Format.duration(Int(covered))) of \(Format.duration(seconds))"
+        }
+        let status: String? = if reached {
+            "Goal reached"
+        } else if speed > 0 {
+            switch goal {
+            case .distance: Format.timeLeft(Int((goal.total - covered) / (speed / 3.6)))
+            case .time: Format.timeLeft(Int(goal.total - covered))
+            }
+        } else if model.session != nil {
+            "Paused"
+        } else {
+            nil
+        }
+        return Button(action: showGoalMenu) {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text(summary)
+                        .foregroundStyle(ink.opacity(0.7))
+                    Spacer(minLength: 4)
+                    if let status {
+                        HStack(spacing: 3) {
+                            if reached { Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)) }
+                            Text(status)
+                        }
+                        .foregroundStyle(reached ? Color.green : ink.opacity(0.7))
+                    }
+                }
+                .font(.system(size: 12, weight: .medium))
+                .monospacedDigit()
+                .lineLimit(1)
+                ZStack(alignment: .leading) {
+                    Capsule().fill(ink.opacity(0.12))
+                    GeometryReader { geo in
+                        Capsule()
+                            .fill(Color.green)
+                            .frame(width: geo.size.width * progress)
+                            .animation(.easeInOut(duration: 0.6), value: progress)
+                    }
+                }
+                .frame(height: 4)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Change distance goal")
+    }
+
+    private func showGoalMenu() {
+        let menu = NSMenu()
+        func choose(_ goal: HudModel.SessionGoal?) {
+            withAnimation(HudAnimation.resize) { model.goal = goal }
+        }
+
+        menu.addItem(.sectionHeader(title: "Distance"))
+        var currentDistance: String?
+        if case .distance(let meters) = model.goal { currentDistance = fmt.distance(Int(meters.rounded())) }
+        for meters in fmt.distanceGoals {
+            let label = fmt.distance(Int(meters.rounded()))
+            menu.addItem(ActionMenuItem(title: "\(label) \(fmt.distanceUnit)", checked: label == currentDistance) {
+                choose(.distance(meters: meters))
+            })
+        }
+
+        menu.addItem(.separator())
+        menu.addItem(.sectionHeader(title: "Time"))
+        for seconds in Format.timeGoals {
+            menu.addItem(ActionMenuItem(title: Format.goalDuration(seconds), checked: model.goal == .time(seconds: seconds)) {
+                choose(.time(seconds: seconds))
+            })
+        }
+
+        menu.addItem(.separator())
+        menu.addItem(ActionMenuItem(title: "No Goal", checked: model.goal == nil) { choose(nil) })
+
+        // Cool-down: after the goal, step the speed down like a reverse ramp.
+        let coolDown = NSMenu()
+        let currentCoolDown = model.coolDownTargetKmh.map { fmt.speed($0) }
+        for kmh in fmt.coolDownTargets {
+            let label = fmt.speed(kmh)
+            coolDown.addItem(ActionMenuItem(title: "To \(label) \(fmt.speedUnit)", checked: label == currentCoolDown) {
+                model.coolDownTargetKmh = kmh
+            })
+        }
+        coolDown.addItem(.separator())
+        coolDown.addItem(ActionMenuItem(title: "Off", checked: model.coolDownTargetKmh == nil) {
+            model.coolDownTargetKmh = nil
+        })
+        menu.addItem(.separator())
+        let coolDownItem = NSMenuItem(title: "Cool Down After Goal", action: nil, keyEquivalent: "")
+        coolDownItem.submenu = coolDown
+        menu.addItem(coolDownItem)
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 
     private var speedControl: some View {
@@ -124,34 +235,45 @@ struct OverlayView: View {
 
     @ViewBuilder
     private var rampControl: some View {
-        if let next = model.nextRampStepAt {
-            rampProgress(nextStepAt: next)
+        if let program = model.program, let next = model.nextProgramStepAt {
+            programProgress(program, nextStepAt: next)
         } else {
+            // Two equal-width pills, matching the height of the round speed buttons.
             HStack(spacing: 8) {
-                RampButton { model.toggleRamp() }
-                    .disabled(!model.canRamp)
-                    .help("Raise speed \(model.useMetric ? "0.2 km/h" : "0.1 mph") every \(Int(HudModel.rampIntervalS)) s up to the target")
-                Spacer(minLength: 0)
-                rampTargetButton
+                PillButton(action: model.toggleRamp) {
+                    Image(systemName: "chart.line.uptrend.xyaxis")
+                        .font(.system(size: 10, weight: .bold))
+                    Text("Ramp")
+                }
+                .disabled(!model.canRamp)
+                .help("Raise speed \(model.useMetric ? "0.2 km/h" : "0.1 mph") every \(Int(HudModel.programIntervalS)) s up to the target")
+                PillButton(action: showRampTargets) {
+                    Text("to \(fmt.speed(model.rampTargetKmh)) \(fmt.speedUnit)")
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                }
+                .help("Ramp target")
             }
         }
     }
 
-    /// While ramping, the whole row becomes one progress bar plus a cancel button.
-    private func rampProgress(nextStepAt next: Date) -> some View {
-        HStack(spacing: 8) {
+    /// While a ramp or cool-down runs, the whole row becomes one progress bar plus a cancel button.
+    private func programProgress(_ program: HudModel.SpeedProgram, nextStepAt next: Date) -> some View {
+        let tint: Color = program.up ? .blue : .teal
+        let goal = program.up ? model.rampTargetKmh : (model.coolDownTargetKmh ?? 0)
+        return HStack(spacing: 8) {
             ZStack(alignment: .leading) {
-                Capsule().fill(Color.blue.opacity(0.14))
+                Capsule().fill(tint.opacity(0.14))
                 GeometryReader { geo in
                     Capsule()
-                        .fill(Color.blue.opacity(0.4))
-                        .frame(width: max(geo.size.height, geo.size.width * model.rampProgress))
-                        .animation(.easeInOut(duration: 0.6), value: model.rampProgress)
+                        .fill(tint.opacity(0.4))
+                        .frame(width: max(geo.size.height, geo.size.width * model.programProgress))
+                        .animation(.easeInOut(duration: 0.6), value: model.programProgress)
                 }
                 HStack(spacing: 5) {
-                    Image(systemName: "chart.line.uptrend.xyaxis")
+                    Image(systemName: program.up ? "chart.line.uptrend.xyaxis" : "chart.line.downtrend.xyaxis")
                         .font(.system(size: 10, weight: .bold))
-                    Text("Ramping to \(fmt.speed(model.rampTargetKmh)) \(fmt.speedUnit)")
+                    Text("\(program.up ? "Ramping" : "Cooling down") to \(fmt.speed(goal)) \(fmt.speedUnit)")
                     Spacer(minLength: 4)
                     TimelineView(.periodic(from: .now, by: 1)) { context in
                         Text("\(max(0, Int(next.timeIntervalSince(context.date).rounded(.up))))s")
@@ -163,29 +285,10 @@ struct OverlayView: View {
                 .lineLimit(1)
                 .padding(.horizontal, 10)
             }
-            .frame(height: 26)
-            SpeedButton(symbol: "xmark") { model.toggleRamp() }
-                .help("Stop ramping")
+            .frame(height: HudMetrics.controlHeight)
+            SpeedButton(symbol: "xmark") { model.cancelProgram() }
+                .help(program.up ? "Stop ramping" : "Stop cooling down")
         }
-    }
-
-    private var rampTargetButton: some View {
-        Button(action: showRampTargets) {
-            HStack(spacing: 4) {
-                Text("to \(fmt.speed(model.rampTargetKmh)) \(fmt.speedUnit)")
-                    .monospacedDigit()
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .bold))
-            }
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(ink.opacity(0.8))
-            .padding(.horizontal, 8)
-            .frame(height: 26)
-            .background(Capsule().fill(ink.opacity(0.08)))
-            .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .help("Ramp target")
     }
 
     private func showRampTargets() {
@@ -214,16 +317,8 @@ struct OverlayView: View {
                     .tracking(0.6)
                     .foregroundStyle(ink.opacity(0.45))
                 Spacer()
-                Button(action: toggleHistory) {
-                    Image(systemName: "clock.arrow.circlepath")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(ink.opacity(historyOpen ? 0.9 : 0.55))
-                        .frame(width: 24, height: 24)
-                        .background(Circle().fill(ink.opacity(historyOpen ? 0.14 : 0)))
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .help(historyOpen ? "Hide history" : "Show history")
+                HeaderIconButton(symbol: "clock.arrow.circlepath", active: historyOpen, action: toggleHistory)
+                    .help(historyOpen ? "Hide history" : "Show history")
             }
             Text("\(fmt.distance(model.today.distanceM)) \(fmt.distanceUnit) · \(Format.count(model.today.steps)) steps · \(model.today.elapsedS / 60) min")
                 .font(.system(size: 13, weight: .medium))
@@ -255,6 +350,28 @@ struct OverlayView: View {
     }
 }
 
+/// Small icon toggle used in section headers; highlighted with a soft circle while its feature is on.
+/// Negative padding keeps the 24 pt hit area from making the header line taller.
+private struct HeaderIconButton: View {
+    let symbol: String
+    let active: Bool
+    let action: () -> Void
+    @Environment(\.hudInk) private var ink
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(ink.opacity(active ? 0.9 : 0.55))
+                .frame(width: 24, height: 24)
+                .background(Circle().fill(ink.opacity(active ? 0.14 : 0)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .padding(.vertical, -6)
+    }
+}
+
 private struct SpeedButton: View {
     let symbol: String
     /// nil for the neutral buttons, which follow the HUD tone.
@@ -267,7 +384,7 @@ private struct SpeedButton: View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 13, weight: .bold))
-                .frame(width: 30, height: 30)
+                .frame(width: HudMetrics.controlHeight, height: HudMetrics.controlHeight)
                 .background(Circle().fill((tint ?? ink).opacity(isEnabled ? (tint == nil ? 0.16 : 0.75) : 0.05)))
                 .foregroundStyle((tint == nil ? ink : .white).opacity(isEnabled ? 1 : 0.3))
                 .contentShape(Circle())
@@ -276,24 +393,29 @@ private struct SpeedButton: View {
     }
 }
 
-private struct RampButton: View {
+private enum HudMetrics {
+    /// Height of every tappable control: SpeedButton's circles and the pills.
+    static let controlHeight: CGFloat = 30
+}
+
+/// Capsule button that fills its share of a row.
+private struct PillButton<Label: View>: View {
     let action: () -> Void
+    @ViewBuilder let label: Label
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.hudInk) private var ink
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: "chart.line.uptrend.xyaxis")
-                    .font(.system(size: 10, weight: .bold))
-                Text("Ramp")
-            }
-            .font(.system(size: 12, weight: .semibold))
-            .padding(.horizontal, 10)
-            .frame(height: 26)
-            .background(Capsule().fill(ink.opacity(isEnabled ? 0.16 : 0.05)))
-            .foregroundStyle(ink.opacity(isEnabled ? 1 : 0.3))
-            .contentShape(Capsule())
+            HStack(spacing: 5) { label }
+                .font(.system(size: 12, weight: .semibold))
+                .monospacedDigit()
+                .lineLimit(1)
+                .frame(maxWidth: .infinity)
+                .frame(height: HudMetrics.controlHeight)
+                .background(Capsule().fill(ink.opacity(isEnabled ? 0.16 : 0.05)))
+                .foregroundStyle(ink.opacity(isEnabled ? 1 : 0.3))
+                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
     }
@@ -323,6 +445,8 @@ private struct Stat: View {
     let label: String
     let value: String
     let unit: String
+    /// Optional small line under the value, e.g. pace under speed.
+    var detail: String?
     @Environment(\.hudInk) private var ink
 
     var body: some View {
@@ -337,6 +461,13 @@ private struct Stat: View {
                 Text(unit)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(ink.opacity(0.5))
+            }
+            if let detail {
+                Text(detail)
+                    .font(.system(size: 11, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(ink.opacity(0.5))
+                    .lineLimit(1)
             }
         }
         .frame(width: 100, alignment: .leading)

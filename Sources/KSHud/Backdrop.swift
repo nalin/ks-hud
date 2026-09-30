@@ -1,15 +1,27 @@
 import AppKit
 import ScreenCaptureKit
 
-/// Samples the screen behind the HUD about once a second and picks the HUD tone that contrasts with it:
-/// dark over bright content, light over dark content. Needs Screen Recording permission; without it the HUD stays dark
-/// and nothing touches ScreenCaptureKit, so macOS isn't asked again and again.
+/// Picks the HUD's tone. In `.auto` it samples the screen behind the HUD about once a second and contrasts with it:
+/// dark over bright content, light over dark content. Auto needs Screen Recording permission; without it the HUD stays
+/// dark and nothing touches ScreenCaptureKit, so macOS isn't asked again and again. Light and dark never sample.
 final class Backdrop: ObservableObject {
+    enum Appearance: String, CaseIterable {
+        case auto, light, dark
+
+        var title: String {
+            switch self {
+            case .auto: "Auto"
+            case .light: "Light"
+            case .dark: "Dark"
+            }
+        }
+    }
+
     @Published private(set) var hudIsLight = false
-    @Published var enabled: Bool {
+    @Published var appearance: Appearance {
         didSet {
-            UserDefaults.standard.set(enabled, forKey: "adaptiveContrast")
-            enabled ? start() : stop()
+            UserDefaults.standard.set(appearance.rawValue, forKey: "hudAppearance")
+            apply()
         }
     }
 
@@ -20,7 +32,13 @@ final class Backdrop: ObservableObject {
     private var retryAfter = Date.distantPast
 
     init() {
-        enabled = UserDefaults.standard.object(forKey: "adaptiveContrast") as? Bool ?? true
+        let defaults = UserDefaults.standard
+        if let saved = defaults.string(forKey: "hudAppearance").flatMap(Appearance.init(rawValue:)) {
+            appearance = saved
+        } else {
+            // Earlier versions had an on/off "Adaptive Contrast" toggle; off meant always dark.
+            appearance = defaults.object(forKey: "adaptiveContrast") as? Bool == false ? .dark : .auto
+        }
     }
 
     func attach(_ window: NSWindow) {
@@ -28,7 +46,17 @@ final class Backdrop: ObservableObject {
         NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: window, queue: .main) { [weak self] _ in
             self?.sample()
         }
-        if enabled { start() }
+        apply()
+    }
+
+    private func apply() {
+        switch appearance {
+        case .auto:
+            start()
+        case .light, .dark:
+            stop()
+            hudIsLight = appearance == .light
+        }
     }
 
     private func start() {
@@ -42,11 +70,10 @@ final class Backdrop: ObservableObject {
     private func stop() {
         timer?.invalidate()
         timer = nil
-        hudIsLight = false
     }
 
     private func sample() {
-        guard enabled, !sampling, Date() >= retryAfter, CGPreflightScreenCaptureAccess(), let window, window.isVisible, let screen = window.screen,
+        guard appearance == .auto, !sampling, Date() >= retryAfter, CGPreflightScreenCaptureAccess(), let window, window.isVisible, let screen = window.screen,
               let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
         else { return }
         // ScreenCaptureKit wants display-local points with a top-left origin.

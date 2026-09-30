@@ -100,7 +100,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let showItem = NSMenuItem(title: "Show Overlay", action: #selector(toggleOverlay), keyEquivalent: "")
     private let clickThroughItem = NSMenuItem(title: "Click-Through", action: #selector(toggleClickThrough), keyEquivalent: "")
     private let metricItem = NSMenuItem(title: "Metric Units", action: #selector(toggleMetric), keyEquivalent: "")
-    private let contrastItem = NSMenuItem(title: "Adaptive Contrast", action: #selector(toggleContrast), keyEquivalent: "")
+    private let appearanceItems = Backdrop.Appearance.allCases.map { appearance in
+        let item = NSMenuItem(title: appearance.title, action: #selector(setAppearance(_:)), keyEquivalent: "")
+        item.representedObject = appearance.rawValue
+        return item
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         panel = OverlayPanel { [model, backdrop] onResize in
@@ -111,10 +115,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let menu = NSMenu()
         menu.delegate = self
-        for item in [showItem, clickThroughItem, metricItem, contrastItem] {
+        for item in [showItem, clickThroughItem, metricItem] {
             item.target = self
             menu.addItem(item)
         }
+        let appearanceMenu = NSMenu()
+        for item in appearanceItems {
+            item.target = self
+            appearanceMenu.addItem(item)
+        }
+        let appearance = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
+        appearance.submenu = appearanceMenu
+        menu.addItem(appearance)
         menu.addItem(.separator())
         let history = NSMenuItem(title: "History…", action: #selector(showHistory), keyEquivalent: "y")
         history.target = self
@@ -137,7 +149,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         showItem.state = panel.isVisible ? .on : .off
         clickThroughItem.state = panel.ignoresMouseEvents ? .on : .off
         metricItem.state = model.useMetric ? .on : .off
-        contrastItem.state = backdrop.enabled ? .on : .off
+        for item in appearanceItems {
+            item.state = item.representedObject as? String == backdrop.appearance.rawValue ? .on : .off
+        }
     }
 
     @objc private func toggleOverlay() {
@@ -152,8 +166,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.useMetric.toggle()
     }
 
-    @objc private func toggleContrast() {
-        backdrop.enabled.toggle()
+    @objc private func setAppearance(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let appearance = Backdrop.Appearance(rawValue: raw) else { return }
+        backdrop.appearance = appearance
     }
 
     @objc private func showHistory() {
