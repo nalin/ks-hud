@@ -5,12 +5,35 @@ struct HistoryView: View {
     @ObservedObject var store: SessionStore
     @ObservedObject var model: HudModel
     @State private var expanded: Set<Date> = []
+    @State private var addingSession = false
 
     private var fmt: Format { Format(metric: model.useMetric) }
 
     var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Spacer()
+                Button { addingSession = true } label: {
+                    Label("Add Session…", systemImage: "plus")
+                }
+                .help("Add a walk the app didn't record")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            Divider()
+            sessionList
+        }
+        .frame(minWidth: 520, minHeight: 360)
+        .sheet(isPresented: $addingSession) {
+            ManualSessionForm(model: model) { start in
+                expanded.insert(Calendar.current.startOfDay(for: start))
+            }
+        }
+    }
+
+    private var sessionList: some View {
         let days = store.days
-        Group {
+        return Group {
             if days.isEmpty {
                 ContentUnavailableView("No sessions yet", systemImage: "figure.walk",
                                        description: Text("Walks of 30 seconds or longer are saved automatically."))
@@ -18,7 +41,16 @@ struct HistoryView: View {
                 List {
                     ForEach(days) { day in
                         DisclosureGroup(isExpanded: isExpanded(day.date)) {
-                            ForEach(day.sessions) { SessionRow(session: $0, live: $0.id == model.session?.id, fmt: fmt) }
+                            ForEach(day.sessions) { session in
+                                SessionRow(session: session, live: session.id == model.session?.id, fmt: fmt)
+                                    .contextMenu {
+                                        if session.isManual {
+                                            Button("Delete Manual Entry", role: .destructive) {
+                                                model.deleteManualSession(id: session.id)
+                                            }
+                                        }
+                                    }
+                            }
                         } label: {
                             DayRow(day: day, fmt: fmt)
                         }
@@ -27,7 +59,6 @@ struct HistoryView: View {
                 .listStyle(.inset)
             }
         }
-        .frame(minWidth: 520, minHeight: 360)
     }
 
     private func isExpanded(_ date: Date) -> Binding<Bool> {
@@ -76,16 +107,13 @@ private struct SessionRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text("\(session.start.formatted(date: .omitted, time: .shortened)) – \(session.end.formatted(date: .omitted, time: .shortened))")
-                    if live {
-                        Text("LIVE")
-                            .font(.caption2.weight(.bold))
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Capsule().fill(.green.opacity(0.2)))
-                            .foregroundStyle(.green)
-                    }
+                    if live { Tag(text: "LIVE", color: .green) }
+                    if session.isManual { Tag(text: "MANUAL", color: .secondary) }
                 }
-                Text("Avg \(fmt.speed(session.avgSpeedKmh)) · max \(fmt.speed(session.maxSpeedKmh)) \(fmt.speedUnit)")
+                // A manual entry has no speed trace, so only its average is meaningful.
+                Text(session.isManual
+                     ? "Avg \(fmt.speed(session.avgSpeedKmh)) \(fmt.speedUnit) · entered by hand"
+                     : "Avg \(fmt.speed(session.avgSpeedKmh)) · max \(fmt.speed(session.maxSpeedKmh)) \(fmt.speedUnit)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -94,6 +122,20 @@ private struct SessionRow: View {
                     steps: session.steps ?? 0, kcal: session.kcal, fmt: fmt)
         }
         .padding(.vertical, 2)
+    }
+}
+
+private struct Tag: View {
+    let text: String
+    let color: Color
+
+    var body: some View {
+        Text(text)
+            .font(.caption2.weight(.bold))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(Capsule().fill(color.opacity(0.2)))
+            .foregroundStyle(color)
     }
 }
 

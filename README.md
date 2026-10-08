@@ -9,6 +9,7 @@ A macOS menu bar app that floats a live workout overlay over your screen for a K
   down 0.2 mph every 15 s once the goal is reached
 - Appearance: Auto (turns dark or light depending on what's behind it; needs Screen Recording), Light, or Dark
 - History inside the overlay (and in a separate window): sessions grouped by day, expandable to individual sessions
+- Add walks the app missed by hand from the History window (overlapping entries are rejected)
 - Sessions saved as JSON in `~/Library/Application Support/KSHud/sessions/`
 
 ## Build

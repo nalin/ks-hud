@@ -264,6 +264,24 @@ final class HudModel: ObservableObject {
         treadmill.pause()
     }
 
+    /// Saves a session entered by hand (e.g. a walk the app missed) and updates today's totals.
+    func addManualSession(start: Date, durationS: Int, distanceM: Int, steps: Int?, kcal: Int?) {
+        let id = start.formatted(.iso8601.year().month().day().dateSeparator(.dash)
+            .time(includingFractionalSeconds: false).timeSeparator(.omitted))
+            + "-manual-" + UUID().uuidString.prefix(4).lowercased()
+        let avgKmh = durationS > 0 ? Double(distanceM) / Double(durationS) * 3.6 : 0
+        store.save(SessionRecord(id: id, start: start, end: start.addingTimeInterval(Double(durationS)),
+                                 elapsedS: durationS, distanceM: distanceM, kcal: kcal ?? 0, steps: steps,
+                                 maxSpeedKmh: avgKmh, trace: [], manual: true))
+        refreshToday()
+    }
+
+    func deleteManualSession(id: String) {
+        guard store.sessions.contains(where: { $0.id == id && $0.isManual }) else { return }
+        store.delete(id: id)
+        refreshToday()
+    }
+
     func checkpoint() {
         guard let s = session, s.elapsedS >= Self.minSavedS else { return }
         store.save(s)
@@ -352,7 +370,7 @@ final class HudModel: ObservableObject {
 
     /// After an app restart or dropped link, pick up the saved session the treadmill is still counting.
     private func resumedSession(for sample: TreadmillSample, at now: Date) -> SessionRecord? {
-        guard var s = store.sessions.last,
+        guard var s = store.sessions.last(where: { !$0.isManual }),
               now.timeIntervalSince(s.end) < 600,
               s.elapsedS <= sample.elapsedS, s.distanceM <= sample.distanceM else { return nil }
         update(&s, with: sample, at: now)

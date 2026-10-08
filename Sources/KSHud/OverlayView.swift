@@ -22,8 +22,8 @@ extension EnvironmentValues {
 struct OverlayView: View {
     @ObservedObject var model: HudModel
     @ObservedObject var backdrop: Backdrop
-    /// Reports the HUD's natural size so the panel can resize around it.
-    let onResize: (CGSize) -> Void
+    /// Resizing and dragging of the panel that hosts the HUD.
+    let panel: PanelHooks
     /// Plain state rather than @AppStorage: AppStorage's update can land outside withAnimation, so the change
     /// would snap instead of animating. Persisted by hand in toggleHistory().
     @State private var historyOpen = UserDefaults.standard.bool(forKey: "inlineHistoryOpen")
@@ -72,13 +72,18 @@ struct OverlayView: View {
         .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(ink.opacity(0.1)))
         // Content is revealed as the card grows instead of spilling past its bottom edge mid-animation.
         .clipShape(RoundedRectangle(cornerRadius: 16))
+        // Drag anywhere on the card to move the HUD; buttons and menus inside keep their own clicks.
+        .contentShape(RoundedRectangle(cornerRadius: 16))
+        .gesture(DragGesture(minimumDistance: 3)
+            .onChanged { _ in panel.dragChanged() }
+            .onEnded { _ in panel.dragEnded() })
         .environment(\.hudInk, ink)
         .animation(.easeInOut(duration: 0.4), value: backdrop.hudIsLight)
         .fixedSize(horizontal: false, vertical: true)
         .background(GeometryReader { geo in
             Color.clear
-                .onAppear { onResize(geo.size) }
-                .onChange(of: geo.size) { _, size in onResize(size) }
+                .onAppear { panel.resize(geo.size) }
+                .onChange(of: geo.size) { _, size in panel.resize(size) }
         })
     }
 

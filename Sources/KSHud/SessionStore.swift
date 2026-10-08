@@ -11,6 +11,10 @@ struct SessionRecord: Codable, Identifiable {
     var maxSpeedKmh: Double
     /// Roughly every 10 s of elapsed time: [elapsed s, speed km/h, distance m].
     var trace: [[Double]]
+    /// Entered by hand in the History window rather than recorded from the treadmill.
+    var manual: Bool? = nil
+
+    var isManual: Bool { manual == true }
 
     var avgSpeedKmh: Double { elapsedS > 0 ? Double(distanceM) / Double(elapsedS) * 3.6 : 0 }
 }
@@ -84,6 +88,16 @@ final class SessionStore: ObservableObject {
                 return DaySummary(date: date, sessions: records.sorted { $0.start > $1.start }, totals: totals)
             }
             .sorted { $0.date > $1.date }
+    }
+
+    func delete(id: String) {
+        try? FileManager.default.removeItem(at: directory.appendingPathComponent("\(id).json"))
+        sessions.removeAll { $0.id == id }
+    }
+
+    /// A saved session whose time span overlaps start...end, if any.
+    func overlapping(start: Date, end: Date) -> SessionRecord? {
+        sessions.first { $0.start < end && start < $0.end }
     }
 
     func totals(on day: Date, excluding id: String? = nil) -> Totals {

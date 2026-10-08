@@ -1,22 +1,34 @@
 import AppKit
 import SwiftUI
 
+/// What the HUD's SwiftUI content can ask of its panel.
+struct PanelHooks {
+    /// Report the HUD's natural size; the panel resizes to it, keeping its top edge fixed.
+    let resize: (CGSize) -> Void
+    /// Called on every change of a drag over the card, and once when it ends.
+    let dragChanged: () -> Void
+    let dragEnded: () -> Void
+}
+
 /// Borderless, always-on-top panel that floats over every Space, including full-screen apps.
 final class OverlayPanel: NSPanel {
-    /// `content` receives a callback to report the view's natural size; the panel resizes to it, keeping its top edge fixed.
-    init(content: (_ onResize: @escaping (CGSize) -> Void) -> some View) {
+    init(content: (PanelHooks) -> some View) {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         level = .statusBar
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         isOpaque = false
         backgroundColor = .clear
         hasShadow = true
-        isMovableByWindowBackground = true
+        // Dragging is handled by the HUD itself (see dragChanged()): whether SwiftUI content lets AppKit's
+        // move-by-background kick in varies with macOS version and view structure, and it stopped working here.
+        isMovableByWindowBackground = false
         hidesOnDeactivate = false
 
-        let hud = content { [weak self] size in
-            DispatchQueue.main.async { self?.fit(to: size) }
-        }
+        let hud = content(PanelHooks(
+            resize: { [weak self] size in DispatchQueue.main.async { self?.fit(to: size) } },
+            dragChanged: { [weak self] in self?.dragChanged() },
+            dragEnded: { [weak self] in self?.dragEnded() }
+        ))
         // GeometryReader places its content at the top-left and lets it overflow downward. The HUD is briefly
         // taller than the window while growing (and shorter while shrinking); a plain frame would centre it,
         // so the card would jump up and appear to grow from the bottom.
@@ -28,10 +40,27 @@ final class OverlayPanel: NSPanel {
         // Only the top-left corner is remembered: the height changes with the content and grows downward from it.
         // The size is filled in by fit(to:) once SwiftUI reports it.
         setFrameTopLeftPoint(Self.savedTopLeft() ?? Self.defaultTopLeft())
-        NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: self, queue: .main) { [weak self] _ in
-            guard let self, self.frame.height > 0 else { return }
-            UserDefaults.standard.set([self.frame.minX, self.frame.maxY], forKey: Self.topLeftKey)
-        }
+    }
+
+    /// Mouse position and window origin when the current drag began, both in screen coordinates.
+    private var dragStart: (mouse: NSPoint, origin: NSPoint)?
+
+    /// Follows the mouse in screen coordinates, so the window moving under the gesture can't feed back into it.
+    private func dragChanged() {
+        let mouse = NSEvent.mouseLocation
+        let start = dragStart ?? (mouse, frame.origin)
+        dragStart = start
+        setFrameOrigin(NSPoint(x: start.origin.x + mouse.x - start.mouse.x, y: start.origin.y + mouse.y - start.mouse.y))
+    }
+
+    private func dragEnded() {
+        dragStart = nil
+        saveTopLeft()
+    }
+
+    private func saveTopLeft() {
+        guard frame.height > 0 else { return }
+        UserDefaults.standard.set([frame.minX, frame.maxY], forKey: Self.topLeftKey)
     }
 
     private static let topLeftKey = "overlayTopLeft"
@@ -107,8 +136,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        panel = OverlayPanel { [model, backdrop] onResize in
-            OverlayView(model: model, backdrop: backdrop, onResize: onResize)
+        panel = OverlayPanel { [model, backdrop] hooks in
+            OverlayView(model: model, backdrop: backdrop, panel: hooks)
         }
         panel.orderFrontRegardless()
         backdrop.attach(panel)
