@@ -117,7 +117,9 @@ struct OverlayView: View {
         } else if speed > 0 {
             switch goal {
             case .distance: Format.timeLeft(Int((goal.total - covered) / (speed / 3.6)))
-            case .time: Format.timeLeft(Int(goal.total - covered))
+            // The treadmill's timer ticks every second, so a time goal can count down to the second.
+            // Distance arrives in 10 m steps, so its estimate stays in whole minutes rather than jumping.
+            case .time: "\(Format.duration(Int(goal.total - covered))) left"
             }
         } else if model.session != nil {
             "Paused"
