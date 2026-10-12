@@ -87,6 +87,8 @@ final class HudModel: ObservableObject {
     private var programCommandedKmh = 0.0
     /// Session whose distance goal has already triggered a cool-down, so it only happens once.
     private var coolDownSessionID: String?
+    /// Last time a sample showed the belt moving.
+    private var lastMovingAt = Date.distantPast
 
     /// Shorter sessions (accidental belt starts) are not saved.
     private static let minSavedS = 30
@@ -168,6 +170,13 @@ final class HudModel: ObservableObject {
     }
 
     var canRamp: Bool { hasRoom(.ramp) }
+
+    /// The current session while it may still continue: the belt moved in the last few minutes, so a pause
+    /// or dropped link isn't mistaken for the end of the walk. Nil once it has been idle long enough to count as done.
+    var unsettledSessionID: String? {
+        guard let session, Date().timeIntervalSince(lastMovingAt) < 5 * 60 else { return nil }
+        return session.id
+    }
 
     /// 0–1: how far the belt's actual speed has moved from where the program started toward its goal.
     var programProgress: Double {
@@ -311,6 +320,7 @@ final class HudModel: ObservableObject {
             if wrongWay || overshot { stopProgram() }
         }
         let now = Date()
+        if sample.speedKmh > 0 { lastMovingAt = now }
         if let target = targetKmh,
            abs(sample.speedKmh - target) < 0.05 || sample.speedKmh == 0 || now.timeIntervalSince(targetSetAt) > 15 {
             targetKmh = nil

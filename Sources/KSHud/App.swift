@@ -125,6 +125,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var panel: OverlayPanel!
     private var statusItem: NSStatusItem!
     private var historyWindow: NSWindow?
+    private var settingsWindow: NSWindow?
+    private var poster: SessionPoster!
 
     private let showItem = NSMenuItem(title: "Show Overlay", action: #selector(toggleOverlay), keyEquivalent: "")
     private let clickThroughItem = NSMenuItem(title: "Click-Through", action: #selector(toggleClickThrough), keyEquivalent: "")
@@ -141,6 +143,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         panel.orderFrontRegardless()
         backdrop.attach(panel)
+        // Starts posting finished sessions, if the user has set that up. AppKit calls this on the main thread.
+        poster = MainActor.assumeIsolated { SessionPoster(model: model) }
 
         let menu = NSMenu()
         menu.delegate = self
@@ -163,6 +167,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let folder = NSMenuItem(title: "Open Sessions Folder", action: #selector(openSessions), keyEquivalent: "")
         folder.target = self
         menu.addItem(folder)
+        let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit KS HUD", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -215,6 +223,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // The app has no Dock icon, so bring it forward explicitly.
         NSApp.activate(ignoringOtherApps: true)
         historyWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func showSettings() {
+        if settingsWindow == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 400),
+                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            window.title = "KS HUD Settings"
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: SettingsView(poster: poster))
+            window.center()
+            settingsWindow = window
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
     @objc private func openSessions() {
